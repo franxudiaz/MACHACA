@@ -10,7 +10,7 @@ from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 
 st.set_page_config(page_title="Consolidador M-704", layout="wide")
 st.title("📋 Consolidador Oficial M-704 a PDF")
-st.write("Procesamiento por extracción de texto estructurado directo (sin APIs).")
+st.write("Extracción posicional por coordenadas exactas del formulario oficial.")
 
 def parse_float(val_str):
     if not val_str:
@@ -31,60 +31,111 @@ def extract_from_pdf(file_bytes, filename):
     extracted_items = []
     epigrafe = "GENERAL"
 
-    # 1. Epígrafe desde el nombre del archivo
+    # Epígrafe desde el nombre del archivo
     name_clean = filename.upper().replace(".PDF", "")
     match_name = re.search(r'([B|C]\d{1,3}[A-Z0-9]*[_\s\w\d]+)', name_clean)
     if match_name:
         epigrafe = match_name.group(1).replace("_", " ").strip()
 
     with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
-        full_text = ""
         for page in pdf.pages:
-            t = page.extract_text(layout=False) or ""
-            full_text += "\n" + t
-
-        # 2. Epígrafe alternativo desde el texto
-        if "Justificación" in full_text or "B." in full_text or "C." in full_text:
-            match_ep = re.search(r'([B|C]\.\d+[^;\n\r]+)', full_text)
-            if match_ep:
-                ep_candidato = match_ep.group(1).split("Forma de")[0].strip()
-                if len(ep_candidato) > 4:
-                    epigrafe = ep_candidato
-
-        # 3. Extracción línea por línea analizando importes finales en €
-        # Patrón típico de una fila: N_ORD EMPRESA REFERENCIA NOMENCLATURA CANTIDAD IMP_UNIT IMP_TOTAL
-        lines = full_text.split('\n')
-        for line in lines:
-            line_str = line.strip()
-            if not line_str:
+            words = page.extract_words()
+            if not words:
                 continue
 
-            # Detecta filas que comiencen por número (1-15) y terminen con importe en € o dígitos
-            # Ej: "1 TTECH 88378040BLUE PANTALON DE TRABAJO 2,00 45,60 € 91,20 €"
-            m = re.match(r'^([1-9]|1[0-5])\s+([A-Z0-9_-]+)\s+(.+?)\s+([\d,\.]+)\s+([\d,\.]+\s*€?)\s+([\d,\.]+\s*€?)$', line_str)
-            if m:
-                n_ord = m.group(1)
-                empresa = m.group(2).upper()
-                resto_texto = m.group(3).strip()
-                se_pide = parse_float(m.group(4))
-                imp_unit = parse_float(m.group(5))
-                imp_total = parse_float(m.group(6))
+            # Buscar la cabecera 'N. ORD' para fijar el límite vertical de la tabla
+            header_y = None
+            for w in words:
+                if 'ORD' in w['text'].upper():
+                    header_y = w['bottom']
+                    break
+            if not header_y:
+                header_y = 190.0
 
-                # Separar referencia (primera palabra/código) de la nomenclatura
-                partes = resto_texto.split(" ", 1)
-                referencia = partes[0] if len(partes) > 1 else "-"
-                nomenclatura = partes[1] if len(partes) > 1 else resto_texto
+            # Buscar el pie de la tabla ('VALORACIÓN' o 'VOBO')
+            footer_y = None
+            for w in words:
+                if any(k in w['text'].upper() for k in ['VALORACIÓN', 'VALORACION', 'VOBO', 'VºBº']):
+                    if w['top'] > header_y:
+                        footer_y = w['top']
+                        break
+            if not footer_y:
+                footer_y = 440.0
 
-                if imp_total > 0:
-                    extracted_items.append({
-                        "empresa": empresa,
-                        "referencia": referencia,
-                        "nomenclatura": nomenclatura,
-                        "se_pide": se_pide,
-                        "importe_unitario": imp_unit,
-                        "importe_total": imp_total,
-                        "epigrafe": epigrafe
-                    })
+            # Filtrar las palabras pertenecientes exclusivamente a la zona de datos
+            table_words = [w for w in words if (header_y + 12.0) <= w['top'] <= (footer_y - 2.0)]
+
+            # Agrupar las palabras por renglones según su altura (eje Y)
+            rows = []
+            for w in sorted(table_words, key=lambda x: (x['top'], x['x0'])):
+                matched_row = None
+                for r in rows:
+                    if abs(r['y'] - w['top']) < 7.0:
+                        matched_row = r
+                        break
+                if matched_row:
+                    matched_row['words'].append(w)
+                else:
+                    rows.append({'y': w['top'], 'words': [w]})
+
+            # Clasificar las palabras en columnas según sus coordenadas X
+            # Coordenadas calibradas para el ancho estándar del M-704 en horizontal (~842 pt)
+            for r in sorted(rows, key=lambda x: x['y']):
+                cols = {
+                    'ord': [],
+                    'codigo': [],
+                    'referencia': [],
+                    'nomenclatura': [],
+                    'se_pide': [],
+                    'imp_unit': [],
+                    'imp_total': []
+                }
+                for w in sorted(r['words'], key=lambda x: x['x0']):
+                    x = w['x0']
+                    if x < 40:
+                        cols['ord'].append(w['text'])
+                    elif 40 <= x < 115:
+                        cols['codigo'].append(w['text'])
+                    elif 115 <= x < 210:
+                        cols['referencia'].append(w['text'])
+                    elif 210 <= x < 575:
+                        cols['nomenclatura'].append(w['text'])
+                    elif 575 <= x < 655:
+                        cols['se_pide'].append(w['text'])
+                    elif 655 <= x < 735:
+                        cols['imp_unit'].append(w['text'])
+                    elif x >= 735:
+                        cols['imp_total'].append(w['text'])
+
+                ord_str = " ".join(cols['ord']).strip()
+                codigo_str = " ".join(cols['codigo']).strip().upper()
+                ref_str = " ".join(cols['referencia']).strip()
+                nom_str = " ".join(cols['nomenclatura']).strip()
+                pide_str = " ".join(cols['se_pide']).strip()
+                unit_str = " ".join(cols['imp_unit']).strip()
+                tot_str = " ".join(cols['imp_total']).strip()
+
+                # Ignorar la fila técnica de índices de columna [15, 16, 17, 18...]
+                if codigo_str in ['16', 'CÓDIGO', 'CODIGO'] or 'SITUACIÓN' in ref_str.upper() or 'CATÁLOGO' in nom_str.upper():
+                    continue
+
+                tot_val = parse_float(tot_str)
+                # Si el total viene a 0 o la fila está vacía, se descarta
+                if tot_val <= 0.01 or not codigo_str or not nom_str:
+                    continue
+
+                se_pide_val = parse_float(pide_str)
+                unit_val = parse_float(unit_str)
+
+                extracted_items.append({
+                    "empresa": codigo_str,
+                    "referencia": ref_str,
+                    "nomenclatura": nom_str,
+                    "se_pide": se_pide_val,
+                    "importe_unitario": unit_val,
+                    "importe_total": tot_val,
+                    "epigrafe": epigrafe
+                })
 
     return extracted_items
 
@@ -131,7 +182,7 @@ def build_pdf(data_tree: dict) -> bytes:
                 table_data.append([
                     Paragraph(str(ord_num), cell_style),
                     Paragraph(it["empresa"], cell_style),
-                    Paragraph(it["referencia"], cell_style),
+                    Paragraph(it["referencia"] or "-", cell_style),
                     Paragraph(it["nomenclatura"], cell_style),
                     Paragraph(f"{it['se_pide']:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.'), cell_style),
                     Paragraph(f"{it['importe_unitario']:,.2f} €".replace(',', 'X').replace('.', ',').replace('X', '.'), cell_style),
@@ -209,4 +260,4 @@ if st.button("Procesar y Compilar PDF", type="primary"):
                 mime="application/pdf"
             )
         else:
-            st.error("No se han detectado líneas de pedido válidas en los PDF subidos. Comprueba si los PDF son texto seleccionable o imágenes escaneadas.")
+            st.error("No se han detectado líneas de pedido válidas en los PDF subidos.")
