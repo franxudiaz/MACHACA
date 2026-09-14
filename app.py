@@ -9,8 +9,8 @@ from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, Tabl
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 
 st.set_page_config(page_title="Consolidador M-704", layout="wide")
-st.title("📋 Consolidador Oficial M-704 a PDF (Sin APIs)")
-st.write("Arrastra tus archivos M-704. La extracción se realiza directamente en local/servidor sin claves externas.")
+st.title("📋 Consolidador Oficial M-704 a PDF")
+st.write("Procesamiento por extracción de texto estructurado directo (sin APIs).")
 
 def parse_float(val_str):
     if not val_str:
@@ -31,48 +31,61 @@ def extract_from_pdf(file_bytes, filename):
     extracted_items = []
     epigrafe = "GENERAL"
 
+    # 1. Epígrafe desde el nombre del archivo
     name_clean = filename.upper().replace(".PDF", "")
     match_name = re.search(r'([B|C]\d{1,3}[A-Z0-9]*[_\s\w\d]+)', name_clean)
     if match_name:
         epigrafe = match_name.group(1).replace("_", " ").strip()
 
     with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
+        full_text = ""
         for page in pdf.pages:
-            text = page.extract_text() or ""
-            
-            if "B." in text or "C." in text:
-                match_ep = re.search(r'(B\.\d+[^;\n]+|C\.\d+[^;\n]+)', text)
-                if match_ep:
-                    epigrafe = match_ep.group(1).split("Forma de envío")[0].strip()
+            t = page.extract_text(layout=False) or ""
+            full_text += "\n" + t
 
-            tables = page.extract_tables()
-            for table in tables:
-                for row in table:
-                    clean_row = [str(c).strip() if c is not None else "" for c in row]
-                    
-                    if len(clean_row) >= 7 and re.match(r'^\d+$', clean_row[0]):
-                        try:
-                            codigo_empresa = clean_row[1].strip().upper()
-                            referencia = clean_row[2].strip()
-                            nomenclatura = clean_row[3].strip()
-                            
-                            se_pide = parse_float(clean_row[-3])
-                            imp_unit = parse_float(clean_row[-2])
-                            imp_total = parse_float(clean_row[-1])
+        # 2. Epígrafe alternativo desde el texto
+        if "Justificación" in full_text or "B." in full_text or "C." in full_text:
+            match_ep = re.search(r'([B|C]\.\d+[^;\n\r]+)', full_text)
+            if match_ep:
+                ep_candidato = match_ep.group(1).split("Forma de")[0].strip()
+                if len(ep_candidato) > 4:
+                    epigrafe = ep_candidato
 
-                            if imp_total > 0 and codigo_empresa:
-                                extracted_items.append({
-                                    "empresa": codigo_empresa,
-                                    "referencia": referencia,
-                                    "nomenclatura": nomenclatura,
-                                    "se_pide": se_pide,
-                                    "importe_unitario": imp_unit,
-                                    "importe_total": imp_total,
-                                    "epigrafe": epigrafe
-                                })
-                        except Exception:
-                            continue
-                            
+        # 3. Extracción línea por línea analizando importes finales en €
+        # Patrón típico de una fila: N_ORD EMPRESA REFERENCIA NOMENCLATURA CANTIDAD IMP_UNIT IMP_TOTAL
+        lines = full_text.split('\n')
+        for line in lines:
+            line_str = line.strip()
+            if not line_str:
+                continue
+
+            # Detecta filas que comiencen por número (1-15) y terminen con importe en € o dígitos
+            # Ej: "1 TTECH 88378040BLUE PANTALON DE TRABAJO 2,00 45,60 € 91,20 €"
+            m = re.match(r'^([1-9]|1[0-5])\s+([A-Z0-9_-]+)\s+(.+?)\s+([\d,\.]+)\s+([\d,\.]+\s*€?)\s+([\d,\.]+\s*€?)$', line_str)
+            if m:
+                n_ord = m.group(1)
+                empresa = m.group(2).upper()
+                resto_texto = m.group(3).strip()
+                se_pide = parse_float(m.group(4))
+                imp_unit = parse_float(m.group(5))
+                imp_total = parse_float(m.group(6))
+
+                # Separar referencia (primera palabra/código) de la nomenclatura
+                partes = resto_texto.split(" ", 1)
+                referencia = partes[0] if len(partes) > 1 else "-"
+                nomenclatura = partes[1] if len(partes) > 1 else resto_texto
+
+                if imp_total > 0:
+                    extracted_items.append({
+                        "empresa": empresa,
+                        "referencia": referencia,
+                        "nomenclatura": nomenclatura,
+                        "se_pide": se_pide,
+                        "importe_unitario": imp_unit,
+                        "importe_total": imp_total,
+                        "epigrafe": epigrafe
+                    })
+
     return extracted_items
 
 def build_pdf(data_tree: dict) -> bytes:
@@ -87,8 +100,8 @@ def build_pdf(data_tree: dict) -> bytes:
     )
     styles = getSampleStyleSheet()
     
-    title_style = ParagraphStyle('T1', parent=styles['Heading1'], fontName='Helvetica-Bold', fontSize=18, leading=22, textColor=colors.HexColor('#1A365D'))
-    epigrafe_style = ParagraphStyle('T2', parent=styles['Heading2'], fontName='Helvetica-Bold', fontSize=12, leading=16, textColor=colors.HexColor('#2C5282'), spaceAfter=6)
+    title_style = ParagraphStyle('T1', parent=styles['Heading1'], fontName='Helvetica-Bold', fontSize=16, leading=20, textColor=colors.HexColor('#1A365D'))
+    epigrafe_style = ParagraphStyle('T2', parent=styles['Heading2'], fontName='Helvetica-Bold', fontSize=11, leading=15, textColor=colors.HexColor('#2C5282'), spaceAfter=5)
     cell_style = ParagraphStyle('Cell', parent=styles['Normal'], fontName='Helvetica', fontSize=8, leading=10)
     cell_bold = ParagraphStyle('CellB', parent=cell_style, fontName='Helvetica-Bold')
 
@@ -97,7 +110,7 @@ def build_pdf(data_tree: dict) -> bytes:
 
     for idx_comp, empresa in enumerate(companies):
         story.append(Paragraph(f"EMPRESA: {empresa.upper()}", title_style))
-        story.append(Spacer(1, 10))
+        story.append(Spacer(1, 8))
         empresa_total = 0.0
 
         for epigrafe, items in data_tree[empresa].items():
@@ -118,7 +131,7 @@ def build_pdf(data_tree: dict) -> bytes:
                 table_data.append([
                     Paragraph(str(ord_num), cell_style),
                     Paragraph(it["empresa"], cell_style),
-                    Paragraph(it["referencia"] or "-", cell_style),
+                    Paragraph(it["referencia"], cell_style),
                     Paragraph(it["nomenclatura"], cell_style),
                     Paragraph(f"{it['se_pide']:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.'), cell_style),
                     Paragraph(f"{it['importe_unitario']:,.2f} €".replace(',', 'X').replace('.', ',').replace('X', '.'), cell_style),
@@ -144,7 +157,7 @@ def build_pdf(data_tree: dict) -> bytes:
                 ('BOTTOMPADDING', (0, 0), (-1, -1), 3),
             ]))
             story.append(t)
-            story.append(Spacer(1, 14))
+            story.append(Spacer(1, 12))
 
         total_str = f"{empresa_total:,.2f} €".replace(',', 'X').replace('.', ',').replace('X', '.')
         total_data = [[
@@ -155,8 +168,8 @@ def build_pdf(data_tree: dict) -> bytes:
         t_total.setStyle(TableStyle([
             ('BACKGROUND', (0, 0), (-1, -1), colors.HexColor('#CBD5E0')),
             ('GRID', (0, 0), (-1, -1), 1, colors.HexColor('#2D3748')),
-            ('TOPPADDING', (0, 0), (-1, -1), 5),
-            ('BOTTOMPADDING', (0, 0), (-1, -1), 5),
+            ('TOPPADDING', (0, 0), (-1, -1), 4),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
         ]))
         story.append(t_total)
 
@@ -171,10 +184,10 @@ uploaded_files = st.file_uploader("Arrastra aquí los archivos PDF del M-704", t
 
 if st.button("Procesar y Compilar PDF", type="primary"):
     if not uploaded_files:
-        st.warning("Selecciona o arrastra al menos un PDF.")
+        st.warning("Selecciona al menos un archivo PDF.")
     else:
         data_tree = {}
-        with st.spinner("Extrayendo datos y consolidando..."):
+        with st.spinner("Extrayendo pedidos..."):
             for f in uploaded_files:
                 items = extract_from_pdf(f.read(), f.name)
                 for it in items:
@@ -188,7 +201,7 @@ if st.button("Procesar y Compilar PDF", type="primary"):
 
         if data_tree:
             pdf_bytes = build_pdf(data_tree)
-            st.success("¡Documento compilado con éxito sin usar ninguna API!")
+            st.success("¡Documento compilado con éxito!")
             st.download_button(
                 label="📥 Descargar PEDIDOS_CONSOLIDADOS_M704.pdf",
                 data=pdf_bytes,
@@ -196,4 +209,4 @@ if st.button("Procesar y Compilar PDF", type="primary"):
                 mime="application/pdf"
             )
         else:
-            st.error("No se detectaron tablas con importes válidos en los PDF subidos.")
+            st.error("No se han detectado líneas de pedido válidas en los PDF subidos. Comprueba si los PDF son texto seleccionable o imágenes escaneadas.")
