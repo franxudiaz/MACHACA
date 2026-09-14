@@ -10,7 +10,7 @@ from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 
 st.set_page_config(page_title="Consolidador M-704", layout="wide")
 st.title("📋 Consolidador Oficial M-704 a PDF")
-st.write("Extracción posicional por coordenadas exactas del formulario oficial.")
+st.write("Extracción directa robusta por patrones contables oficiales.")
 
 def parse_float(val_str):
     if not val_str:
@@ -31,111 +31,86 @@ def extract_from_pdf(file_bytes, filename):
     extracted_items = []
     epigrafe = "GENERAL"
 
-    # Epígrafe desde el nombre del archivo
+    # Epígrafe extraído directamente del nombre de archivo estandarizado
     name_clean = filename.upper().replace(".PDF", "")
     match_name = re.search(r'([B|C]\d{1,3}[A-Z0-9]*[_\s\w\d]+)', name_clean)
     if match_name:
         epigrafe = match_name.group(1).replace("_", " ").strip()
 
     with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
+        full_text = ""
         for page in pdf.pages:
-            words = page.extract_words()
-            if not words:
+            t = page.extract_text(layout=False) or ""
+            full_text += "\n" + t
+
+        # Respaldo de epígrafe desde el cuerpo si en el nombre no venía completo
+        if "Justificación" in full_text or "B." in full_text or "C." in full_text:
+            match_ep = re.search(r'([B|C]\.\d+[^;\n\r]+)', full_text)
+            if match_ep:
+                ep_candidato = match_ep.group(1).split("Forma de")[0].strip()
+                if len(ep_candidato) > 4:
+                    epigrafe = ep_candidato
+
+        lines = full_text.split('\n')
+        for line in lines:
+            line_str = line.strip()
+            if not line_str:
                 continue
 
-            # Buscar la cabecera 'N. ORD' para fijar el límite vertical de la tabla
-            header_y = None
-            for w in words:
-                if 'ORD' in w['text'].upper():
-                    header_y = w['bottom']
-                    break
-            if not header_y:
-                header_y = 190.0
+            # Descartar cabeceras técnicas, índices [15, 16...] y firmas
+            if any(k in line_str.upper() for k in ['SITUACIÓN', 'SITUACION', 'CATÁLOGO', 'CATALOGO', 'VALORACIÓN', 'VALORACION', 'CLASE DE PETICION', 'VOBO', 'AUTORIZADO']):
+                continue
 
-            # Buscar el pie de la tabla ('VALORACIÓN' o 'VOBO')
-            footer_y = None
-            for w in words:
-                if any(k in w['text'].upper() for k in ['VALORACIÓN', 'VALORACION', 'VOBO', 'VºBº']):
-                    if w['top'] > header_y:
-                        footer_y = w['top']
-                        break
-            if not footer_y:
-                footer_y = 440.0
-
-            # Filtrar las palabras pertenecientes exclusivamente a la zona de datos
-            table_words = [w for w in words if (header_y + 12.0) <= w['top'] <= (footer_y - 2.0)]
-
-            # Agrupar las palabras por renglones según su altura (eje Y)
-            rows = []
-            for w in sorted(table_words, key=lambda x: (x['top'], x['x0'])):
-                matched_row = None
-                for r in rows:
-                    if abs(r['y'] - w['top']) < 7.0:
-                        matched_row = r
-                        break
-                if matched_row:
-                    matched_row['words'].append(w)
+            # Patrón contable de fila de pedido:
+            # Empieza por número de orden (1 a 15)
+            # Termina con: CANTIDAD + PRECIO_UNIT (€ opcional) + PRECIO_TOTAL €
+            # Ejemplo: "1 OBI 3648458 WD-40 Univerzálne... 5,00 8,50 € 42,50 €"
+            pattern = r'^([1-9]|1[0-5])\s+([A-Za-z0-9_-]+)\s+([A-Za-z0-9_\-\.\/]+)\s+(.+?)\s+([\d]+[,\.][\d]{2})\s+([\d]+[,\.][\d]{2}\s*€?)\s+([\d]+[,\.][\d]{2}\s*€)$'
+            
+            m = re.match(pattern, line_str)
+            if not m:
+                # Patrón alternativo si no trae referencia separada o tiene formato compacto
+                pattern_alt = r'^([1-9]|1[0-5])\s+([A-Za-z0-9_-]+)\s+(.+?)\s+([\d]+[,\.][\d]{2})\s+([\d]+[,\.][\d]{2}\s*€?)\s+([\d]+[,\.][\d]{2}\s*€)$'
+                m = re.match(pattern_alt, line_str)
+                if m:
+                    ord_num = m.group(1)
+                    empresa = m.group(2).upper()
+                    resto_nom = m.group(3).strip()
+                    p_pide = m.group(4)
+                    p_unit = m.group(5)
+                    p_tot = m.group(6)
+                    
+                    partes = resto_nom.split(' ', 1)
+                    referencia = partes[0] if len(partes) > 1 else "-"
+                    nomenclatura = partes[1] if len(partes) > 1 else resto_nom
                 else:
-                    rows.append({'y': w['top'], 'words': [w]})
-
-            # Clasificar las palabras en columnas según sus coordenadas X
-            # Coordenadas calibradas para el ancho estándar del M-704 en horizontal (~842 pt)
-            for r in sorted(rows, key=lambda x: x['y']):
-                cols = {
-                    'ord': [],
-                    'codigo': [],
-                    'referencia': [],
-                    'nomenclatura': [],
-                    'se_pide': [],
-                    'imp_unit': [],
-                    'imp_total': []
-                }
-                for w in sorted(r['words'], key=lambda x: x['x0']):
-                    x = w['x0']
-                    if x < 40:
-                        cols['ord'].append(w['text'])
-                    elif 40 <= x < 115:
-                        cols['codigo'].append(w['text'])
-                    elif 115 <= x < 210:
-                        cols['referencia'].append(w['text'])
-                    elif 210 <= x < 575:
-                        cols['nomenclatura'].append(w['text'])
-                    elif 575 <= x < 655:
-                        cols['se_pide'].append(w['text'])
-                    elif 655 <= x < 735:
-                        cols['imp_unit'].append(w['text'])
-                    elif x >= 735:
-                        cols['imp_total'].append(w['text'])
-
-                ord_str = " ".join(cols['ord']).strip()
-                codigo_str = " ".join(cols['codigo']).strip().upper()
-                ref_str = " ".join(cols['referencia']).strip()
-                nom_str = " ".join(cols['nomenclatura']).strip()
-                pide_str = " ".join(cols['se_pide']).strip()
-                unit_str = " ".join(cols['imp_unit']).strip()
-                tot_str = " ".join(cols['imp_total']).strip()
-
-                # Ignorar la fila técnica de índices de columna [15, 16, 17, 18...]
-                if codigo_str in ['16', 'CÓDIGO', 'CODIGO'] or 'SITUACIÓN' in ref_str.upper() or 'CATÁLOGO' in nom_str.upper():
                     continue
+            else:
+                ord_num = m.group(1)
+                empresa = m.group(2).upper()
+                referencia = m.group(3).strip()
+                nomenclatura = m.group(4).strip()
+                p_pide = m.group(5)
+                p_unit = m.group(6)
+                p_tot = m.group(7)
 
-                tot_val = parse_float(tot_str)
-                # Si el total viene a 0 o la fila está vacía, se descarta
-                if tot_val <= 0.01 or not codigo_str or not nom_str:
-                    continue
+            # Evitar capturar números de columna como empresa
+            if empresa.isdigit() or empresa in ['ORD', 'NO', 'DE']:
+                continue
 
-                se_pide_val = parse_float(pide_str)
-                unit_val = parse_float(unit_str)
+            tot_val = parse_float(p_tot)
+            if tot_val <= 0.01:
+                continue
 
-                extracted_items.append({
-                    "empresa": codigo_str,
-                    "referencia": ref_str,
-                    "nomenclatura": nom_str,
-                    "se_pide": se_pide_val,
-                    "importe_unitario": unit_val,
-                    "importe_total": tot_val,
-                    "epigrafe": epigrafe
-                })
+            extracted_items.append({
+                "empresa": empresa,
+                "referencia": referencia,
+                "nomenclatura": nomenclatura,
+                "se_pide": parse_float(p_pide),
+                "importe_unitario": parse_float(p_unit),
+                "importe_total": tot_val,
+                "epigrafe": epigrafe
+            })
 
     return extracted_items
 
