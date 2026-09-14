@@ -1,25 +1,35 @@
 import io
-import pdfplumber
 import streamlit as st
+import pdfplumber
+from pypdf import PdfReader
 
-st.set_page_config(page_title="Diagnóstico M-704", layout="wide")
-st.title("🔍 Diagnóstico de Lectura M-704")
+st.set_page_config(page_title="Diagnóstico Campos M-704", layout="wide")
+st.title("🔍 Diagnóstico de Campos de Formulario M-704")
 
-uploaded_file = st.file_uploader("Sube un solo PDF para ver su texto interno", type=["pdf"])
+uploaded_file = st.file_uploader("Sube el PDF 001C...", type=["pdf"])
 
 if uploaded_file:
-    with pdfplumber.open(io.BytesIO(uploaded_file.read())) as pdf:
-        st.subheader("1. Líneas de texto extraídas (extract_text)")
-        page = pdf.pages[0]
-        text = page.extract_text(layout=False) or ""
-        lines = [l.strip() for l in text.split("\n") if l.strip()]
-        
-        st.write(f"Total líneas detectadas: {len(lines)}")
-        st.text_area("Texto completo tal cual lo lee Python:", "\n".join(lines), height=300)
+    file_bytes = uploaded_file.read()
+    
+    # 1. Inspeccionar Form Fields con pypdf
+    reader = PdfReader(io.BytesIO(file_bytes))
+    fields = reader.get_fields()
+    
+    st.subheader("1. Campos interactivos detectados (AcroForm / Form Fields)")
+    if fields:
+        st.success(f"¡Se han detectado {len(fields)} campos de formulario!")
+        # Mostrar los campos que tienen valor
+        filled_fields = {k: v.get('/V') for k, v in fields.items() if v.get('/V')}
+        st.json(filled_fields)
+    else:
+        st.warning("No se detectaron campos AcroForm con pypdf.")
 
-        st.subheader("2. Tablas detectadas (extract_tables)")
-        tables = page.extract_tables()
-        if tables:
-            st.json(tables)
+    # 2. Inspeccionar Anotaciones
+    st.subheader("2. Anotaciones de página")
+    with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
+        annots = pdf.pages[0].annots
+        if annots:
+            st.success(f"Detectadas {len(annots)} anotaciones.")
+            st.json(annots[:10])
         else:
-            st.warning("No se detectaron tablas nativas con extract_tables().")
+            st.info("No hay anotaciones.")
